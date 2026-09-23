@@ -1,0 +1,38 @@
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Node / frontend builds
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Unrelated PowerShell cache artifact generated in this workspace
+Microsoft/Windows/PowerShell/ModuleAnalysisCache
+
+# Docker local data and overrides
+docker-data/
+docker-compose.override.yml
