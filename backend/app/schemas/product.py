@@ -2,8 +2,11 @@ from datetime import datetime
 from uuid import UUID
 from pydantic import Field
 from app.schemas.common import Money, Schema, TimestampRead, UpdateSchema
+from app.schemas.catalog_attributes import Size, Color
 
 class ProductVariantCreate(Schema):
+    size: Size = None
+    color: Color = None
     sku: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=255)
     price: Money
@@ -12,6 +15,8 @@ class ProductVariantCreate(Schema):
     is_active: bool = True
 
 class ProductVariantUpdate(UpdateSchema):
+    size: Size = None
+    color: Color = None
     required_fields = {"sku", "name", "price", "stock_quantity", "is_active"}
     sku: str | None = Field(default=None, min_length=1, max_length=100)
     name: str | None = Field(default=None, min_length=1, max_length=255)

@@ -32,12 +32,17 @@ def test_provider_error_sanitized(whatsapp_settings, status):
             WhatsAppClient(whatsapp_settings, http).send_text_message("212600000001", "Hello")
         assert secret not in str(error.value)
         assert str(status) in str(error.value)
+        assert error.value.diagnostics["failure_category"] == "http_error"
+        assert error.value.diagnostics["http_status"] == status
+        assert error.value.diagnostics["meta_error_message"] is None
 
 @pytest.mark.parametrize("body", [{}, {"messages": []}, {"messages": [{"id": None}]}, {"messages": [{"id": "x" * 256}]}, []])
 def test_invalid_provider_response(whatsapp_settings, body):
     with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body))) as http:
-        with pytest.raises(WhatsAppAPIError):
+        with pytest.raises(WhatsAppAPIError) as error:
             WhatsAppClient(whatsapp_settings, http).send_text_message("212600000001", "Hello")
+        assert error.value.diagnostics["failure_category"] == "invalid_response"
+        assert error.value.diagnostics["http_status"] == 200
 
 def test_timeout_no_retry(whatsapp_settings):
     calls = []
@@ -48,6 +53,8 @@ def test_timeout_no_retry(whatsapp_settings):
         with pytest.raises(WhatsAppAPIError, match="transport failure") as error:
             WhatsAppClient(whatsapp_settings, http).send_text_message("212600000001", "Hello")
         assert "sensitive" not in str(error.value)
+        assert error.value.diagnostics["failure_category"] == "transport_error"
+        assert error.value.diagnostics["http_status"] is None
         assert len(calls) == 1
 
 @pytest.mark.parametrize("field", ["whatsapp_access_token", "whatsapp_phone_number_id", "whatsapp_api_version"])

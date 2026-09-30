@@ -37,11 +37,15 @@ class OrderItemRead(TimestampRead):
     line_total: Money
 
 class OrderRead(OrderCreate, TimestampRead):
+    shipping_full_name: str | None
+    shipping_address_line: str | None
+    shipping_city: str | None
+    shipping_cost: Money | None
     items: list[OrderItemRead]
     customer: CustomerRead
     order_number: str
     subtotal: Money
-    total: Money
+    total: Money | None
     status: OrderStatus
 
 class OrderStatusUpdate(Schema):

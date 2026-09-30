@@ -20,3 +20,5 @@ def test_conversation_messages(client, customer, db_session):
     assert messages[0]["metadata"] == {"index": 0}
     assert client.get(path + "/messages?limit=1&offset=1").json()[0]["id"] == ids[1]
     assert client.post(path + "/messages", json={"direction": "bad", "sender_type": "customer"}).status_code == 422
+    assert client.post(path + "/messages", json={"direction": "inbound", "sender_type": "customer",
+        "content": "hello", "metadata": {"ai_guard": {"category": "commerce"}}}).status_code == 422

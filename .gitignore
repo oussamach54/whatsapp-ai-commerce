@@ -36,3 +36,6 @@ Microsoft/Windows/PowerShell/ModuleAnalysisCache
 # Docker local data and overrides
 docker-data/
 docker-compose.override.yml
+
+# Local validation databases
+.validation/

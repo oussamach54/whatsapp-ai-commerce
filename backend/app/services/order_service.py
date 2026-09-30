@@ -53,3 +53,37 @@ def update_payment_status(db: Session, order_id: UUID, data: PaymentStatusUpdate
     with transaction(db):
         apply_update(get_order(db, order_id), data)
     return get_order(db, order_id)
+
+
+def stage_cod_order(db, customer, cart, variants, catalog):
+    """Internal stage in checkout's authorized, locked transaction. No LLM tool."""
+    from app.models import InventoryMovement
+    from app.models.enums import PaymentMethod, PaymentStatus
+    from app.services.checkout_service import missing_fields, confirmation_authorized
+    if cart.status != "confirmed" or missing_fields(catalog.settings, cart) or not confirmation_authorized(db, catalog, cart):
+        raise ServiceError(422, "Checkout not authorized")
+    fields = {name: value.value for name, value in cart.fields.items()}
+    order = Order(customer_id=customer.id, status=OrderStatus.CONFIRMED,
+        payment_method=PaymentMethod.COD, payment_status=PaymentStatus.PENDING,
+        currency=catalog.settings.catalog_currency, subtotal=Decimal(cart.subtotal),
+        shipping_cost=Decimal(cart.shipping_cost) if cart.shipping_cost is not None else None,
+        total=Decimal(cart.total) if cart.total is not None else None,
+        shipping_full_name=fields.get("customer_name"), shipping_phone_number=fields.get("phone", customer.phone_number),
+        shipping_city=fields.get("city"), shipping_address_line=fields.get("address"),
+        shipping_postal_code=fields.get("postal_code"), shipping_country=catalog.settings.checkout_country,
+        customer_notes=fields.get("delivery_note"), source_cart_id=cart.id,
+        source_conversation_id=catalog.target.conversation_id, source_message_id=cart.confirmation_message_id)
+    db.add(order)
+    db.flush()
+    for line in cart.items:
+        variant = variants[line.target.variant_id]
+        if variant.stock_quantity < line.quantity or variant.price != Decimal(line.unit_price):
+            raise ServiceError(409, "Catalog changed")
+        db.add(OrderItem(order_id=order.id, product_variant_id=variant.id, quantity=line.quantity,
+            product_name_snapshot=line.product_name, variant_name_snapshot=line.variant_name,
+            sku_snapshot=variant.sku, unit_price=variant.price, line_total=variant.price * line.quantity))
+        variant.stock_quantity -= line.quantity
+        db.add(InventoryMovement(product_variant_id=variant.id, quantity_change=-line.quantity,
+            reason="cod_order_created", reference_type="order", reference_id=str(order.id)))
+    db.flush()
+    return order

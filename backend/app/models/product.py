@@ -50,6 +50,8 @@ class ProductVariant(UUIDTimestampMixin, Base):
     sku: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    size: Mapped[str | None] = mapped_column(String(64))
+    color: Mapped[str | None] = mapped_column(String(64))
     compare_at_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     stock_quantity: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)

@@ -5,6 +5,76 @@ from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import Session
 
 
+@pytest.fixture
+def catalog_env(db_session):
+    from contextlib import contextmanager
+    from uuid import uuid4
+    from app.core.config import Settings
+    from app.models import Customer, Conversation, Message
+    from app.models.enums import ConversationChannel, ConversationStatus, MessageDirection, MessageType, SenderType
+    from app.integrations.whatsapp.schemas import ReplyTarget
+    from app.services.catalog_service import CatalogService
+    settings = Settings(_env_file=None, database_host="localhost", database_name="test",
+        database_user="test", database_password="test", whatsapp_phone_number_id="catalog-business",
+        openai_model="mock-model", openai_api_key="mock-key")
+    conversation = Conversation(customer=Customer(phone_number=uuid4().hex),
+        channel=ConversationChannel.WHATSAPP, status=ConversationStatus.ACTIVE)
+    inbound = Message(conversation=conversation, direction=MessageDirection.INBOUND,
+        sender_type=SenderType.CUSTOMER, message_type=MessageType.TEXT, content="montre-moi vos produits",
+        metadata_={"provider": "whatsapp", "phone_number_id": settings.whatsapp_phone_number_id})
+    db_session.add(inbound)
+    db_session.flush()
+    target = ReplyTarget(conversation_id=conversation.id, inbound_id=inbound.id, phone_number="212600001111")
+    active = []
+    @contextmanager
+    def sessions():
+        active.append(True)
+        try:
+            yield db_session
+        finally:
+            active.pop()
+    return CatalogService(sessions, settings, target), inbound, active
+
+
+@pytest.fixture
+def catalog_product(db_session):
+    from uuid import uuid4
+    from decimal import Decimal
+    from app.models import Product, ProductVariant
+    def create(name="Pantalon", **kwargs):
+        p = Product(name=name, slug=uuid4().hex, category="vêtements", description="Description catalogue")
+        v = ProductVariant(product=p, name="Noir M", sku=uuid4().hex,
+            price=Decimal("100.00"), size="M", color="noir", stock_quantity=4)
+        for k, value in kwargs.items():
+            setattr(v, k, value)
+        db_session.add(p)
+        db_session.flush()
+        return p, v
+    return create
+
+
+@pytest.fixture
+def allowed_admission(monkeypatch):
+    """Isolate pre-existing network/persistence tests; real admission has DB tests."""
+    from unittest.mock import Mock
+    admission = Mock()
+    admission.begin.return_value = "allowed"
+    admission.reserve.return_value = "allowed"
+    admission.safe_record.return_value = True
+    monkeypatch.setattr("app.services.whatsapp_service.AIAdmission", Mock(return_value=admission))
+    return admission
+
+
+@pytest.fixture(autouse=True)
+def block_paid_ai_requests(monkeypatch):
+    import httpx2
+
+    def no_network(*args, **kwargs):
+        pytest.fail("Real OpenAI SDK network requests are forbidden in tests")
+
+    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", no_network)
+
+
 def _test_database_url() -> URL | None:
     required = ("TEST_DATABASE_HOST", "TEST_DATABASE_NAME", "TEST_DATABASE_USER", "TEST_DATABASE_PASSWORD")
     if not all(os.getenv(name) for name in required):

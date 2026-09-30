@@ -6,6 +6,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 from app.api.dependencies import Database
+from app.ai.dependencies import get_ai_service
+from app.ai.service import AIService
 from app.integrations.whatsapp.client import TextMessageClient
 from app.integrations.whatsapp.dependencies import WhatsAppSettings, get_whatsapp_client_factory, get_reply_session_factory
 from app.integrations.whatsapp.parser import parse_messages
@@ -29,8 +31,15 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks,
     db: Database, settings: WhatsAppSettings,
     client_factory: Annotated[Callable[[], TextMessageClient], Depends(get_whatsapp_client_factory)],
     session_factory: Annotated[SessionFactory, Depends(get_reply_session_factory)],
+    ai_service: Annotated[AIService, Depends(get_ai_service)],
 ) -> dict[str, str]:
-    body = await request.body()
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > settings.whatsapp_max_body_bytes:
+            raise ServiceError(413, "Webhook body too large")
+        chunks.append(chunk)
+    body = b"".join(chunks)
     validate_signature(body, request.headers.get("x-hub-signature-256"), settings.whatsapp_app_secret)
     logger.info("whatsapp.webhook_received")
     try:
@@ -47,5 +56,5 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks,
         for incoming in messages:
             target = await run_in_threadpool(persist_inbound, db, incoming)
             if target is not None:
-                background_tasks.add_task(send_automatic_reply, target, client, session_factory)
+                background_tasks.add_task(send_automatic_reply, target, client, session_factory, incoming.text, ai_service)
     return {"status": "ok"}

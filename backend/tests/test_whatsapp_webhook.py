@@ -20,6 +20,7 @@ from app.integrations.whatsapp.client import WhatsAppAPIError
 from app.integrations.whatsapp.dependencies import get_whatsapp_client_factory, get_reply_session_factory
 from app.integrations.whatsapp.parser import parse_messages
 from app.services.whatsapp_service import AUTO_REPLY
+from app.ai.replies import local_reply
 
 PATH = "/api/webhooks/whatsapp"
 
@@ -33,7 +34,8 @@ def wa_setup(monkeypatch):
     settings = get_settings().model_copy(update={
         "whatsapp_verify_token": SecretStr(secrets.token_hex(24)),
         "whatsapp_app_secret": SecretStr(secrets.token_hex(24)),
-        "whatsapp_phone_number_id": "123456789", "whatsapp_access_token": None})
+        "whatsapp_phone_number_id": "123456789", "whatsapp_access_token": None,
+        "openai_api_key": None, "openai_model": None})
     outbound = Mock()
     outbound.send_text_message.side_effect = lambda *args: "wamid.out." + uuid4().hex
     old = app.dependency_overrides.copy()
@@ -137,11 +139,11 @@ def test_inbound_reply_idempotency_and_reuse(wa_db_client, wa_setup, db_session)
     assert inbound.created_at == datetime.fromtimestamp(1700000000, tz=timezone.utc)
     assert inbound.metadata_["provider"] == "whatsapp"
     conversation_id = inbound.conversation_id
-    outbound.send_text_message.assert_called_once_with(phone, AUTO_REPLY)
+    outbound.send_text_message.assert_called_once_with(phone, local_reply("social", "french"))
     messages = list(db_session.scalars(select(Message).where(Message.conversation_id == conversation_id)))
     assert len(messages) == 2
     reply = next(m for m in messages if m.direction == MessageDirection.OUTBOUND)
-    assert reply.sender_type == SenderType.SYSTEM and reply.content == AUTO_REPLY
+    assert reply.sender_type == SenderType.SYSTEM and reply.content == local_reply("social", "french")
     assert reply.external_message_id.startswith("wamid.out.")
     assert signed_post(wa_db_client, settings, data).status_code == 200
     assert outbound.send_text_message.call_count == 1
@@ -169,6 +171,30 @@ def test_outbound_failure_keeps_inbound(wa_db_client, wa_setup, db_session):
     assert inbound.content == "Bonjour"
     assert db_session.scalar(select(func.count()).select_from(Message).where(Message.conversation_id == inbound.conversation_id)) == 1
     assert outbound.send_text_message.call_count == 1
+
+@pytest.mark.parametrize("category,status", [
+    ("transport_error", None), ("http_error", 401), ("invalid_response", 200),
+])
+def test_diagnostic_failure_still_acknowledged(wa_client, wa_setup, monkeypatch, caplog, category, status, allowed_admission):
+    from app.integrations.whatsapp.schemas import ReplyTarget
+    settings, outbound = wa_setup
+    target = ReplyTarget(conversation_id=uuid4(), inbound_id=uuid4(), phone_number="212600000001")
+    persist = Mock(return_value=target)
+    monkeypatch.setattr("app.api.routes.whatsapp.persist_inbound", persist)
+    app.dependency_overrides[get_db] = lambda: Mock()
+    sessions = Mock()
+    app.dependency_overrides[get_reply_session_factory] = lambda: sessions
+    outbound.send_text_message.side_effect = WhatsAppAPIError(
+        "Sanitized failure", failure_category=category, http_status=status)
+    assert signed_post(wa_client, settings, payload()).status_code == 200
+    persist.assert_called_once()
+    outbound.send_text_message.assert_called_once_with(target.phone_number, local_reply("social", "french"))
+    # Social replies need no history and a failed send needs no write session.
+    sessions.assert_not_called()
+    record = next(record for record in caplog.records if record.getMessage().startswith("whatsapp.outbound_failed"))
+    assert record.failure_category == category
+    assert record.http_status == status
+
 
 def test_database_enforces_external_id_uniqueness(wa_db_client, wa_setup, db_session):
     data = payload(phone="212" + str(uuid4().int)[:12])
@@ -204,3 +230,134 @@ def test_raw_body_tampering_rejected(wa_client, wa_setup):
     signature = hmac.new(wa_setup[0].whatsapp_app_secret.get_secret_value().encode(), body, hashlib.sha256).hexdigest()
     response = wa_client.post(PATH, content=body + b" ", headers={"X-Hub-Signature-256": "sha256=" + signature})
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize("category", [None, "timeout", "api_error", "unavailable", "invalid_response"])
+def test_ai_reply_pipeline_acknowledges_and_deduplicates(wa_client, wa_setup, monkeypatch, category, allowed_admission):
+    from app.ai.dependencies import get_ai_service
+    from app.ai.exceptions import AIError
+    from app.ai.service import AIService
+    from app.integrations.whatsapp.schemas import ReplyTarget
+
+    settings, outbound = wa_setup
+    target = ReplyTarget(conversation_id=uuid4(), inbound_id=uuid4(), phone_number="212600000001")
+    persist = Mock(side_effect=[target, None])
+    monkeypatch.setattr("app.api.routes.whatsapp.persist_inbound", persist)
+    stage = Mock()
+    monkeypatch.setattr("app.services.whatsapp_service.stage_message", stage)
+    provider = Mock()
+    monkeypatch.setattr("app.services.whatsapp_service.recent_ai_history", Mock(return_value=[]))
+    provider.generate.return_value = "Bonjour ! Comment puis-je vous aider ?"
+    if category is not None:
+        provider.generate.side_effect = AIError(category)
+    app.dependency_overrides[get_ai_service] = lambda: AIService(provider, settings=wa_setup[0].model_copy(update={"openai_model": "test-model", "openai_api_key": SecretStr("test-key")}))
+    app.dependency_overrides[get_db] = lambda: Mock()
+    db = Mock()
+
+    @contextmanager
+    def sessions():
+        yield db
+
+    app.dependency_overrides[get_reply_session_factory] = lambda: sessions
+    data = payload()
+    data["entry"][0]["changes"][0]["value"]["messages"][0]["text"]["body"] = "Bonjour, cadeau ?"
+    assert signed_post(wa_client, settings, data).status_code == 200
+    assert signed_post(wa_client, settings, data).status_code == 200
+    expected = AUTO_REPLY if category else provider.generate.return_value
+    provider.generate.assert_called_once()
+    assert provider.generate.call_args.args[0].message_text == "Bonjour, cadeau ?"
+    outbound.send_text_message.assert_called_once_with(target.phone_number, expected)
+    assert stage.call_args.args[2].content == expected
+    db.commit.assert_called_once()
+
+
+def test_history_failure_still_acknowledged(wa_client, wa_setup, monkeypatch, allowed_admission):
+    from app.ai.dependencies import get_ai_service
+    from app.ai.service import AIService
+    from app.integrations.whatsapp.schemas import ReplyTarget
+    target = ReplyTarget(conversation_id=uuid4(), inbound_id=uuid4(), phone_number="212600000001")
+    monkeypatch.setattr("app.api.routes.whatsapp.persist_inbound", Mock(return_value=target))
+    monkeypatch.setattr("app.services.whatsapp_service.recent_ai_history", Mock(side_effect=RuntimeError("private")))
+    monkeypatch.setattr("app.services.whatsapp_service.stage_message", Mock())
+    provider = Mock()
+    provider.generate.return_value = "Bonjour !"
+    app.dependency_overrides[get_ai_service] = lambda: AIService(provider, settings=wa_setup[0].model_copy(update={"openai_model": "test-model", "openai_api_key": SecretStr("test-key")}))
+    @contextmanager
+    def sessions():
+        yield Mock()
+    app.dependency_overrides[get_reply_session_factory] = lambda: sessions
+    data = payload()
+    data["entry"][0]["changes"][0]["value"]["messages"][0]["text"]["body"] = "cadeau ?"
+    assert signed_post(wa_client, wa_setup[0], data).status_code == 200
+    assert len(provider.generate.call_args.args[0].messages) == 1
+
+
+def test_acknowledgment_precedes_background_work(wa_setup, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from fastapi import BackgroundTasks
+    from fastapi.responses import JSONResponse
+    from app.api.routes.whatsapp import receive_webhook
+    from app.integrations.whatsapp.schemas import ReplyTarget
+    settings, outbound = wa_setup
+    body = json.dumps(payload()).encode()
+    request = Mock(body=AsyncMock(return_value=body), headers={"x-hub-signature-256": "sha256=" +
+        hmac.new(settings.whatsapp_app_secret.get_secret_value().encode(), body, hashlib.sha256).hexdigest()})
+    async def stream():
+        yield body[:17]
+        yield body[17:]
+    request.stream = stream
+    target = ReplyTarget(conversation_id=uuid4(), inbound_id=uuid4(), phone_number="212600000001")
+    monkeypatch.setattr("app.api.routes.whatsapp.persist_inbound", Mock(return_value=target))
+    events = []
+    def reply(*args):
+        assert events == ["http.response.start", "http.response.body"]
+        events.append("background")
+    monkeypatch.setattr("app.api.routes.whatsapp.send_automatic_reply", reply)
+    async def run():
+        tasks = BackgroundTasks()
+        result = await receive_webhook(request, tasks, Mock(), settings, lambda: outbound, Mock(), Mock())
+        assert events == []
+        async def send(event):
+            if event["type"] == "http.response.start":
+                assert event["status"] == 200
+            events.append(event["type"])
+        await JSONResponse(result, background=tasks)({"type": "http"}, AsyncMock(), send)
+    asyncio.run(run())
+    assert events[-1] == "background"
+
+
+def test_body_limit_preserves_signature_checks(wa_client, wa_setup):
+    settings, outbound = wa_setup
+    settings.whatsapp_max_body_bytes = 1024
+    assert signed_post(wa_client, settings, b" " * 1025).status_code == 413
+    assert signed_post(wa_client, settings, b"{}" + b" " * 1022).status_code == 200
+    outbound.send_text_message.assert_not_called()
+
+
+@pytest.mark.parametrize("length", [2001, 4096, 4097])
+def test_oversized_text_persistence_and_no_ai(wa_db_client, wa_setup, db_session, length):
+    settings, outbound = wa_setup
+    data = payload(phone="212" + str(uuid4().int)[:12])
+    incoming = data["entry"][0]["changes"][0]["value"]["messages"][0]
+    incoming["text"]["body"] = "x" * length
+    assert signed_post(wa_db_client, settings, data).status_code == 200
+    row = db_session.scalar(select(Message).where(Message.external_message_id == incoming["id"]))
+    if length <= 4096:
+        assert row.content == "x" * length
+        assert row.metadata_["ai_guard"]["attempts"] == {}
+        outbound.send_text_message.assert_called_once_with(incoming["from"], local_reply("shorten", "french"))
+    else:
+        assert row is None
+        outbound.send_text_message.assert_not_called()
+
+
+def test_blocked_customer_still_persisted_and_acknowledged(wa_db_client, wa_setup, db_session):
+    customer = Customer(phone_number="212" + str(uuid4().int)[:12], is_blocked=True)
+    db_session.add(customer)
+    db_session.commit()
+    data = payload(phone=customer.phone_number)
+    assert signed_post(wa_db_client, wa_setup[0], data).status_code == 200
+    wa_setup[1].send_text_message.assert_not_called()
+    row = db_session.scalar(select(Message).where(Message.external_message_id == data["entry"][0]["changes"][0]["value"]["messages"][0]["id"]))
+    assert row.metadata_["ai_guard"]["category"] == "blocked"
