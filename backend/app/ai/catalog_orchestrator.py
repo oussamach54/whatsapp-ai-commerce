@@ -39,6 +39,10 @@ Use evidence equal to the full customer message. A subsequent product answer to
 our ordering invitation continues the purchase proposal. Asking for advice or
 availability alone is not an order confirmation. Delivery ETA/contact questions
 use business_question/delivery_time; facts come only from business configuration.
+Order cancellation requests use cancellation with literal full-message evidence
+and faithful speech_act. The application resolves only the customer's own orders
+and asks a separate cancellation question. Never propose order IDs or interpret
+a bare affirmative as an order cancellation request.
 For natural requests populate customer_intent; this structured interpretation is
 executed by the application using current catalog data. It is a proposal, not an
 authorization or a source of facts. No model prose is sent as business facts.
@@ -230,7 +234,7 @@ def _run_catalog(service, text, history, style, admission, catalog):
         messages.reverse()
         messages.append({"role": "user", "content": json.dumps({"catalog_reference_data": refs.model_dump(mode="json")})})
         if getattr(catalog, "turn_state", None):
-            state_data = catalog.turn_state.model_dump(mode="json", exclude={"cart"})
+            state_data = catalog.turn_state.model_dump(mode="json", exclude={"cart", "cancellation"})
             if catalog.turn_state.cart:
                 from app.services.checkout_service import missing_fields
                 cart = catalog.turn_state.cart

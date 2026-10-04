@@ -28,6 +28,25 @@ class CatalogService:
         self.sessions, self.settings, self.target = sessions, settings, target
         self.deadline = None
 
+    def product_by_slug(self, slug):
+        """Application URL resolution, not an additional model-callable tool."""
+        with self.sessions() as db:
+            self.authorize(db)
+            return self.execute(db, select(Product.id).where(Product.slug == slug,
+                Product.is_active.is_(True))).scalar_one_or_none()
+
+    def product_links(self, refs):
+        from app.services.product_links import product_url
+        if not self.settings.storefront_base_url:
+            return []
+        ids = list(dict.fromkeys(ref.product_id for ref in refs))[:3]
+        with self.sessions() as db:
+            self.authorize(db)
+            slugs = dict(self.execute(db, select(Product.id, Product.slug).where(
+                Product.id.in_(ids), Product.is_active.is_(True))).all())
+        return [url for product_id in ids if product_id in slugs
+                if (url := product_url(self.settings, slugs[product_id]))]
+
     def execute(self, db, statement):
         if self.deadline is not None:
             remaining = int((self.deadline - monotonic()) * 1000)

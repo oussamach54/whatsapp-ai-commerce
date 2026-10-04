@@ -6,6 +6,7 @@ from pydantic import Field
 from app.ai.catalog_schemas import Contract, SearchProducts, ProductRef, Operation, AttributeMap, AttributeName, AttributeValue, CustomerIntent
 from app.ai.schemas import LanguageStyle
 from app.ai.checkout_state import Cart
+from app.ai.cancellation_state import PendingCancellation
 
 class Pending(Contract):
     operation: Operation
@@ -69,9 +70,12 @@ class CommerceState(Contract):
     intervening_turns: int = Field(default=0, ge=0, le=100)
     # A preserved focus is not necessarily the target of the latest list/question.
     target_ambiguous: bool = False
+    # A failed image/link target must not borrow an older focus on a bare size.
+    unresolved_input_reference: bool = False
     customer_intent: CustomerIntent | None = None
     purchase: PurchaseIntent | None = None
     cart: Cart | None = None
+    cancellation: PendingCancellation | None = None
 
 
 class Interpretation(Contract):

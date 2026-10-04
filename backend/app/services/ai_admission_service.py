@@ -102,7 +102,7 @@ class AIAdmission:
             return "allowed"
 
     def reserve(self, stage, model):
-        if stage not in ("classifier", "generation", "generation_2", "generation_3"):
+        if stage not in ("classifier", "generation", "generation_2", "generation_3", "vision", "link_intent"):
             raise ValueError("Unknown stage")
         with self.sessions() as db, transaction(db):
             message, customer, business, identity, now = self._anchor(db)

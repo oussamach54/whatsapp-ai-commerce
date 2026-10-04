@@ -31,6 +31,7 @@ class TextMessageClient(Protocol):
 
 class WhatsAppClient:
     def __init__(self, settings: Settings, http_client: httpx.Client) -> None:
+        self._settings = settings
         self._token = require_secret(settings.whatsapp_access_token, "WHATSAPP_ACCESS_TOKEN")
         version = settings.whatsapp_api_version or ""
         phone_id = settings.whatsapp_phone_number_id or ""
@@ -43,6 +44,10 @@ class WhatsAppClient:
         for secret in (settings.whatsapp_access_token, settings.whatsapp_app_secret, settings.whatsapp_verify_token, settings.openai_api_key):
             if secret is not None:
                 self._sensitive_values.append(secret.get_secret_value())
+
+    def download_image(self, media):
+        from app.integrations.whatsapp.media import download_image
+        return download_image(self, media)
 
     def _safe_meta_message(self, value: object) -> str | None:
         if not isinstance(value, str):

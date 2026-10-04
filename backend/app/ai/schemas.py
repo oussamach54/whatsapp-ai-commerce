@@ -30,6 +30,7 @@ class SalesReply:
     catalog_refs: dict | None = None
     commerce_state: dict | None = None
     preserve_commerce: bool = False
+    confirmation_prompt: dict | None = None
 
 
 class AIHistoryMessage(BaseModel):

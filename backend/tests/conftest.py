@@ -67,12 +67,14 @@ def allowed_admission(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def block_paid_ai_requests(monkeypatch):
+    import httpx
     import httpx2
 
     def no_network(*args, **kwargs):
         pytest.fail("Real OpenAI SDK network requests are forbidden in tests")
 
     monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", no_network)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", no_network)
 
 
 def _test_database_url() -> URL | None:

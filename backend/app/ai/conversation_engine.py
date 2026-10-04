@@ -1,9 +1,11 @@
 """Application-owned turn transitions around the bounded semantic catalog planner.
 
 Customer language identifies a query, database DTOs establish facts, and only
-locally authorized choice acts can change selection. No order actions exist here.
+locally authorized choice acts can change selection. Order writes require the
+application-owned consent and transaction boundaries.
 """
 import json
+import logging
 import re
 from datetime import datetime
 from decimal import Decimal
@@ -22,8 +24,47 @@ from app.ai.attribute_adapter import CATALOG_ATTRIBUTES as attribute_adapter, At
 CHOICE = r"(?:(?:safi\s+)?(?:nakhod|khod lia|bghit|je prends|je choisis|je veux commander|je veux|i choose|i take|i want to order|بغيت|ناخد)\s+)"
 CORRECTION = r"(?:la(?: la)?|non)\s*,?\s*(?:finalement\s*)?"
 CANCEL = re.compile(r"^(?:ma b9itch bghito|annule (?:choix dyali|mon choix|ma selection)|cancel (?:my )?selection|لغي الاختيار)[.! ]*$")
-PRICE = re.compile(r"^(?:ch7al(?: taman)?|combien|quel prix|how much|price|prix|شحال(?: الثمن)?)[ ؟?!.]*$")
-STOCK = re.compile(r"^(?:wach )?kayn[ ؟?!.]*$|^(?:available|in stock|disponible|متوفر)[ ؟?!.]*$")
+PRICE = re.compile(r"^(?:(?:bchhal|bch7al|ch7al)(?: taman| hada)?|combien|quel prix|how much|price|prix|شحال(?: الثمن)?)[ ؟?!.]*$")
+# Whole availability questions only: "kayn f coton" remains an attribute request.
+STOCK = re.compile(
+    r"^(?:(?:wach )?(?:mazal )?kayn(?: (?:f )?stock)?|"
+    r"(?:(?:est[- ]ce que |c'est |est[- ]il )?(?:toujours |encore )?)(?:disponible|en stock)|"
+    r"(?:is (?:it|this|that) )?(?:still )?(?:available|in stock)|\u0645\u062a\u0648\u0641\u0631)[ \u061f?!.]*$"
+)
+
+
+def availability_body(text):
+    """Separate an availability question from its literal catalog constraints.
+
+    A positive availability expression is required; unknown option values such
+    as 'kayn f coton' retain the normal attribute interpretation.
+    """
+    value = normalize(text).strip(" ?؟!.")
+    if STOCK.fullmatch(value):
+        return ""
+    phrase = r"\b(?:(?:mazal )?kayn f stock|(?:mazal )?kayn(?=$)|(?:toujours |encore )?disponible|en stock|(?:still )?available|in stock)\b"
+    if not re.search(phrase, value):
+        return None
+    value = re.sub(phrase, " ", value)
+    value = re.sub(r"^(?:wach|est[- ]ce que|est[- ]il|is|are|do you have)\s+", "", value.strip())
+    value = re.sub(r"\s+(?:est|is|are)$", "", value.strip())
+    value = re.sub(r"^(?:est|is|are)\s+", "", value.strip())
+    if value in ("it", "this", "that", "hada", "hadak", "ce produit", "il", "c'est"):
+        return ""
+    return value.strip()
+
+
+def availability_query(body):
+    # Explicit category/brand labels constrain the catalog rather than becoming
+    # search terms. Unlabelled names/categories/brands remain lexical terms.
+    filters = {}
+    for field, labels in (("category", "category|categorie|catégorie"), ("brand", "brand|marque")):
+        match = re.search(r"\b(?:" + labels + r")\s+([\w-]+)\b", body)
+        if match:
+            filters[field] = match[1]
+            body = body[:match.start()] + " " + body[match.end():]
+    query = query_body(body)
+    return query.model_copy(update=filters) if query else None
 
 
 def confirmation_answer(text):
@@ -82,7 +123,7 @@ Gifts, budgets, broadening and descriptive needs retain semantic interpretation.
 
 def contextual_shortcut(text):
     from app.ai.catalog_orchestrator import attribute_change, reference_hint
-    return bool(attribute_adapter.inspect(text).followup or attribute_adapter.inspect(text).requested or attribute_change(text) or PRICE.fullmatch(normalize(text)) or STOCK.fullmatch(normalize(text))
+    return bool(attribute_adapter.inspect(text).followup or attribute_adapter.inspect(text).requested or attribute_change(text) or PRICE.fullmatch(normalize(text)) or availability_body(text) is not None
                 or CANCEL.fullmatch(normalize(text)) or choice_body(text, True)
                 or reference_hint(text) != "none" or re.search(r"\b(?:arkhess|ahsan|katnsa7ni)\b", normalize(text))
                 or re.fullmatch(r"3ndi\s+\d+\s*(?:dh|mad)", normalize(text)))
@@ -107,6 +148,8 @@ def load_memory(catalog):
         cart, catalog.checkout_checkpoint = latest_cart(db, catalog)
         if catalog.checkout_checkpoint is not None:
             state.cart = cart
+        from app.services.order_cancellation_service import latest_cancellation
+        state.cancellation, catalog.cancellation_checkpoint = latest_cancellation(db, catalog)
         if state.purchase and not 0 <= (catalog.turn_time - state.purchase.offered_at).total_seconds() <= 900:
             state.purchase = None
         if state.pending and state.pending.created_at and not 0 <= (catalog.turn_time - state.pending.created_at).total_seconds() <= 900:
@@ -330,6 +373,8 @@ class Turn:
         return reply
 
     def detail(self, targets, changes=None, select=False, budget=None, available_only=False):
+        if self.state.unresolved_input_reference and not self.replace_focus:
+            return self.clarify("select" if select else self.operation)
         if len(targets) != 1:
             return self.clarify("select" if select else self.operation, authorization=self.catalog.target.inbound_id if select else None)
         ref = targets[0]
@@ -344,7 +389,7 @@ class Turn:
             self.state.changed_attributes = dict(changes)
             self.state.preserved_attributes = preserved
         requested = attribute_adapter.filters(preserved | (changes or {}))
-        if budget is None and self.state.constraints.max_price:
+        if budget is None and self.state.constraints.max_price and self.operation != "stock":
             budget = Decimal(self.state.constraints.max_price)
         result = self.catalog.get(GetProducts(product_ids=[ref.product_id],
             variant_ids=[ref.variant_id] if ref.variant_id and not changes else [],
@@ -395,7 +440,7 @@ class Turn:
 
     def named(self, query, select, authorization=None, semantic_fallback=False):
         self.lookup = True
-        if query.max_price is None:
+        if query.max_price is None and self.operation != "stock":
             query.max_price = self.state.constraints.max_price
         result = self.catalog.search(query)
         if semantic_fallback and len(query.terms) > 1 and not result.products:
@@ -595,6 +640,10 @@ class Turn:
         if self.state.pending and self.state.pending.created_at is None:
             self.state.pending.created_at = self.catalog.turn_time
             self.state.pending.candidates = new.presented[:3]
+        if self.outcome == "verified":
+            self.state.unresolved_input_reference = False
+        elif getattr(self.catalog, "input_context", None):
+            self.state.unresolved_input_reference = True
         reply.catalog_refs = new.model_dump(mode="json")
         reply.commerce_state = self.state.model_dump(mode="json")
         return reply
@@ -604,7 +653,23 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
     from app.ai.catalog_orchestrator import attribute_change, reference_hint, resolve, budget_from_text
     try:
         refs, source, state, pending_authorized = load_memory(catalog)
-    except Exception:
+    except Exception as exc:
+        # Never format the exception/traceback: DB errors can contain SQL values
+        # and validation errors can contain customer input. Code locations only.
+        frames = []
+        tb = exc.__traceback__
+        while tb is not None:
+            filename = tb.tb_frame.f_code.co_filename.replace("\\", "/")
+            if "/app/" in filename:
+                frames.append(f"{filename.rsplit('/app/', 1)[1]}:{tb.tb_lineno}")
+            tb = tb.tb_next
+        sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+        sqlstate = sqlstate if isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate) else "none"
+        failure_type = type(exc).__name__
+        failure_type = failure_type if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]{0,79}", failure_type) else "Exception"
+        logging.getLogger(__name__).warning(
+            "catalog.memory_failed failure_type=%s sqlstate=%s code_path=%s",
+            failure_type, sqlstate, ">".join(frames[-8:]) or "none")
         admission.safe_record(fallback=True, failure_category="catalog_memory_unavailable")
         return local_catalog("unavailable", style)
     original_state = state.model_copy(deep=True)
@@ -615,6 +680,7 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
     catalog.turn_action = catalog.turn_query = catalog.turn_interpretation = None
     catalog.semantic_handled = False
     value = normalize(text)
+    stock_body = availability_body(text)
     body = choice_body(text, refs.selection is not None)
     # Wants/preferences without a target attribute are discovery, not consent.
     if re.match(r"^(?:bghit|بغيت)\s", value) and not attributes(text) and not affirmative_selection(text):
@@ -633,7 +699,11 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
     if state.unresolved_attribute_value and attribute_input.followup and not attribute_input.explicit:
         unresolved = attribute_adapter.short_body(text)
         attribute_input = AttributeInput(unresolved_value=unresolved, followup=True) if len(unresolved) <= 64 else AttributeInput(followup=True, ambiguous=True)
-    if PRICE.fullmatch(value) or STOCK.fullmatch(value) or explanation_topic(text) is not None:
+    if stock_body is not None:
+        # Inspect the remaining constraints, never the availability vocabulary.
+        attribute_input = attribute_adapter.inspect(stock_body)
+        changes = attribute_input.requested
+    if PRICE.fullmatch(value) or explanation_topic(text) is not None:
         attribute_input = AttributeInput()
     hint = reference_hint(text)
     # A lexical name query must not consume an incompletely parsed attribute
@@ -648,7 +718,15 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
     reply = None
     try:
         catalog.deadline = monotonic() + 45
-        explicit_budget = budget_from_text(text)
+        from app.ai.order_cancellation import local as cancellation_local
+        input_context = getattr(catalog, "input_context", None)
+        cancellation_reply = None if input_context or stock_body is not None else cancellation_local(turn, text)
+        if cancellation_reply is not None:
+            # Cancellation choices must not acquire catalog attributes/budgets
+            # from option quantities, dates, prices or copied snapshot labels.
+            attribute_input = AttributeInput()
+            changes, body, turn.new_hard = None, None, {}
+        explicit_budget = None if cancellation_reply is not None else budget_from_text(text)
         if explicit_budget is not None:
             state.constraints.max_price = str(explicit_budget)
         # A bare value only acquires a field through fresh, unambiguous evidence.
@@ -671,8 +749,13 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
                 state.hard_attributes = state.hard_attributes | attribute_input.requested
         unsupported = set(attribute_input.requested) - set(attribute_adapter.supported)
         from app.ai.checkout import local as checkout_local
-        checkout_reply = checkout_local(turn, text)
-        if checkout_reply is not None:
+        checkout_reply = None if input_context or cancellation_reply is not None or stock_body is not None else checkout_local(turn, text)
+        if input_context:
+            from app.ai.multimodal import apply_input
+            reply = apply_input(turn, input_context)
+        elif cancellation_reply is not None:
+            reply = cancellation_reply
+        elif checkout_reply is not None:
             reply = checkout_reply
         elif state.purchase and confirmation_answer(text) is not None:
             reply = turn.confirm_purchase(text)
@@ -685,6 +768,29 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
             turn.pending = Pending(operation="details", missing="attribute", attribute_name=state.active_attribute)
             reply = local_catalog("attribute_unverified" if unsupported else "attribute", style)
             reply.catalog_refs = refs.model_dump(mode="json")
+        elif stock_body is not None:
+            turn.operation = "stock"
+            query = availability_query(stock_body)
+            tokens = stock_body.split()
+            implicit_variant = (re.match(r"^(?:is|are)\b", value) and len(tokens) == 2
+                and attribute_adapter.fields["color"].normalize(tokens[0]) in attribute_adapter.colors
+                and re.fullmatch(attribute_adapter.symbolic_sizes + r"|small|medium|large", tokens[1]))
+            if implicit_variant and turn.relevant() and not state.target_ambiguous:
+                # Preserve the existing language/variant interpretation for
+                # descriptor-only questions; no literal product target is lost.
+                turn.availability_only = True
+                turn.path = "semantic"
+                reply = semantic(service, text, history, style, admission, catalog)
+            elif query and (query.terms or query.category or query.brand):
+                reply = turn.named(query, False)
+            elif query is None:
+                # An unparsed explicit target cannot fall back to an older focus.
+                state.commercial_ref = state.commercial_at = None
+                state.target_ambiguous = True
+                reply = turn.clarify("stock")
+            else:
+                reply = turn.detail([refs.focus] if turn.relevant() and not state.target_ambiguous else [],
+                                    attribute_input.requested)
         elif CANCEL.fullmatch(value):
             turn.operation = "cancel"
             state.purchase = None
@@ -761,6 +867,11 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
         elif affirmative_selection(text) and hint in ("first", "second", "third"):
             turn.operation = "change" if refs.selection else "select"
             reply = turn.detail(resolve(hint, refs), select=True)
+        elif affirmative_selection(text) and not attributes(text):
+            # A complete referential purchase (e.g. "bghit hada") uses the
+            # verified current focus; it is not a literal product-name search.
+            turn.operation, turn.purchase_requested = "select", True
+            reply = turn.detail([refs.focus] if turn.relevant() and not state.target_ambiguous else [], select=True)
         elif hint == "other":
             reply = turn.detail(resolve(hint, refs))
         elif hint in ("first", "second", "third") and re.fullmatch(r"(?:l |le |the )?(?:premier|deuxième|deuxieme|second|third|first|troisième|troisieme|lowel|tani)[ ?!.]*", value):
@@ -784,7 +895,7 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
                 reply.text += "\n" + words(style)["variant"]
         elif PRICE.fullmatch(value) or STOCK.fullmatch(value):
             turn.operation = "price" if PRICE.fullmatch(value) else "stock"
-            reply = turn.detail([refs.focus] if refs.focus and not state.target_ambiguous else [])
+            reply = turn.detail([refs.focus] if turn.relevant() and not state.target_ambiguous else [])
         elif re.search(r"\b(?:arkhess|ahsan)\b", value) or (state.discussed and re.search(r"\bkatnsa7ni\b", value)):
             turn.operation = "compare" if "arkhess" in value else "recommend"
             reply = turn.comparison()
@@ -834,6 +945,7 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
                 turn.pending.created_at = pending.created_at
         if (turn.selected or turn.purchase_requested) and not turn.confirming:
             reply = turn.offer_from_reply(reply)
+        link_refs = CatalogRefs.model_validate_json(json.dumps(reply.catalog_refs)) if reply.catalog_refs else CatalogRefs()
         reply = turn.finish(reply)
         outcome = next((kind for kind in ("unavailable", "no_matches", "variant_not_found", "product_unavailable")
                         if reply.text == words(style)[kind]), "clarification" if turn.pending else "replied")
@@ -848,14 +960,22 @@ def run_turn(service, text, history, style, admission, catalog, semantic):
             reply.catalog_refs = refs.model_dump(mode="json")
             reply.commerce_state = original_state.model_dump(mode="json")
         else:
+            from app.services.order_cancellation_service import finalize as finalize_cancellation
+            reply = finalize_cancellation(turn, reply)
             from app.services.checkout_service import finalize
             reply = finalize(turn, reply)
+            reply.confirmation_prompt = getattr(turn, "confirmation_prompt", None) or reply.confirmation_prompt
+            if turn.outcome == "verified" and catalog.settings.storefront_base_url:
+                presented = [link_refs.focus] if link_refs.focus else link_refs.presented
+                links = catalog.product_links(presented)
+                for link in links:
+                    if len(reply.text) + len(link) + 1 <= 4096:
+                        reply.text += "\n" + link
         return reply
     except Exception as exc:
         admission.safe_record(fallback=True, failure_category="conversation_unavailable")
         reply = local_catalog("unavailable", style)
         if turn.checkout_dirty:
-            import logging
             from app.ai.checkout import phrase
             order_attempted = bool(getattr(turn, "checkout_order_attempted", False))
             completed_context = bool(turn.state.cart and turn.state.cart.status == "completed")

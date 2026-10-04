@@ -4,6 +4,7 @@ This is not another conversation engine: identity, alternatives, commit/rollback
 confirmation and factual rendering remain application-owned Turn operations.
 """
 from decimal import Decimal
+import re
 
 from app.ai.attribute_adapter import CATALOG_ATTRIBUTES as attributes
 from app.ai.catalog_schemas import SearchProducts
@@ -26,6 +27,8 @@ OPERATIONS = {
 def execute_intent(turn, intent, text):
     from app.ai.catalog_orchestrator import resolve, budget_from_text
     from app.ai.business_knowledge import answer_business_question
+    if getattr(turn, "availability_only", False) and (intent.intent != "availability" or intent.purchase_intent):
+        return turn.clarify("stock")
     # Discovery/detail labels can coexist with an explicit desire to buy. Keep
     # that independent semantic signal; facts and final consent stay app-owned.
     if intent.purchase_intent and intent.intent in ("product_search", "product_details", "availability", "price"):
@@ -67,7 +70,14 @@ def execute_intent(turn, intent, text):
     if intent.intent == "business_question":
         turn.pending = None
         turn.state.requested_attributes = {}
-        return SalesReply(answer_business_question(intent.business_topic, intent.quantity, turn.style, turn.catalog.settings),
+        text = answer_business_question(intent.business_topic, intent.quantity, turn.style, turn.catalog.settings)
+        if (turn.state.cart and turn.state.cart.status == "awaiting_confirmation"
+                and not (turn.state.cancellation and turn.state.cancellation.status in ("choosing", "awaiting_confirmation"))):
+            # Keep the policy interruption flow, but make consent refer to a
+            # newly delivered explicit checkout offer rather than an older one.
+            from app.ai.checkout import render_cart
+            text += "\n\n" + render_cart(turn)
+        return SalesReply(text,
                           catalog_refs=turn.refs.model_dump(mode="json"))
     from app.ai.checkout import propose, receive_fields
     if intent.intent in ("cart_edit", "checkout") or (intent.intent == "purchase" and intent.items):
@@ -91,6 +101,18 @@ def execute_intent(turn, intent, text):
         # requires an explicit affirmative answer to its own current offer.
         return turn.confirm_purchase(text)
     if intent.intent == "cancellation":
+        # A model may propose a request, never an order identity or consent.
+        # Only literal current evidence and affirmative request speech can prompt.
+        from app.ai.order_cancellation import request
+        from app.services.checkout_service import answer
+        if (intent.speech_act not in ("affirmative", "question") or not intent.evidence
+                or normalize(intent.evidence) != normalize(text) or answer(text) is not None):
+            return turn.clarify("details")
+        if (intent.speech_act in ("affirmative", "question") and intent.evidence
+                and normalize(intent.evidence) == normalize(text)
+                and (not turn.state.cart or turn.state.cart.status == "completed"
+                     or re.search(r"\b(?:order|commande)\b", normalize(text)))):
+            return request(turn, text)
         if turn.state.cart:
             from app.ai.checkout import confirm, reply
             if turn.state.cart.status == "completed":

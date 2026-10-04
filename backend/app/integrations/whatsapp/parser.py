@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from pydantic import ValidationError
-from app.integrations.whatsapp.schemas import IncomingText
+from app.integrations.whatsapp.schemas import IncomingText, IncomingImage
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,8 @@ def parse_messages(payload: object, phone_number_id: str) -> list[IncomingText]:
                 logger.info("whatsapp.status_event_ignored")
             for message in _objects(value.get("messages")):
                 text = message.get("text")
-                if message.get("type") != "text" or not isinstance(text, dict):
+                image = message.get("image") if message.get("type") == "image" else None
+                if not isinstance(image, dict) and (message.get("type") != "text" or not isinstance(text, dict)):
                     logger.info("whatsapp.unsupported_message")
                     continue
                 timestamp = None
@@ -36,7 +37,9 @@ def parse_messages(payload: object, phone_number_id: str) -> list[IncomingText]:
                     if message.get("timestamp") is not None:
                         timestamp = datetime.fromtimestamp(int(message["timestamp"]), tz=timezone.utc)
                     result.append(IncomingText(external_message_id=message.get("id"),
-                        phone_number=message.get("from"), text=text.get("body"),
+                        phone_number=message.get("from"),
+                        text=(image.get("caption") or "[image]") if image is not None else text.get("body"),
+                        image=IncomingImage(id=image.get("id"), mime_type=image.get("mime_type")) if image is not None else None,
                         timestamp=timestamp, phone_number_id=phone_number_id))
                 except (ValidationError, ValueError, TypeError, OverflowError, OSError):
                     logger.info("whatsapp.malformed_message_ignored")

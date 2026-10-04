@@ -51,7 +51,8 @@ def committed_carts():
                 message_type=MessageType.TEXT, content="10.10 MAD. Confirm?", external_message_id=uuid4().hex,
                 created_at=now - timedelta(seconds=3), metadata_={"provider": "whatsapp", "in_reply_to": str(request.id),
                 "turn_status": "current", "catalog_refs": CatalogRefs(focus=ref, presented=[ref]).model_dump(mode="json"),
-                "commerce_state": {"cart": cart.model_dump(mode="json")}})
+                "commerce_state": {"cart": cart.model_dump(mode="json")},
+                "confirmation_prompt": {"action": "checkout", "id": str(cart.id), "version": cart.version}})
             confirm = Message(conversation=conversation, direction=MessageDirection.INBOUND, sender_type=SenderType.CUSTOMER,
                 message_type=MessageType.TEXT, content="oui", created_at=now - timedelta(seconds=2),
                 metadata_={"provider": "whatsapp", "phone_number_id": settings.whatsapp_phone_number_id})

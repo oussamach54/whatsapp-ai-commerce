@@ -22,7 +22,7 @@ class AttributeRequest(Contract):
     value: AttributeValue
 
 Operation = Literal["search", "details", "variant", "price", "stock", "compare",
-                    "recommend", "explain", "select", "change", "cancel", "clarify", "social", "unsupported"]
+                    "recommend", "explain", "select", "change", "cancel", "order_cancel", "clarify", "social", "unsupported"]
 
 Intent = Literal["product_search", "availability", "price", "product_details", "recommendation",
                  "comparison", "purchase", "confirmation", "cancellation", "explanation",

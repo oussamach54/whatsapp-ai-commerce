@@ -1,5 +1,10 @@
 # WhatsApp AI Commerce
 
+Step 7.5 adds bounded WhatsApp image interpretation and optional trusted merchant
+product links. See [the multimodal guide](docs/step-7.5-multimodal.md) for configuration,
+privacy, trust boundaries, validation and manual E2E scenarios. The existing frontend
+is not a public storefront; configure `STOREFRONT_BASE_URL` only for real product pages.
+
 A production-oriented foundation for a cash-on-delivery e-commerce platform in which customers will communicate through WhatsApp and business owners will manage commerce operations through an admin dashboard.
 
 ## Architecture

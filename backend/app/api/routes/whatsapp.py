@@ -50,11 +50,12 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks,
     if not phone_id:
         raise ServiceError(503, "WhatsApp configuration missing: WHATSAPP_PHONE_NUMBER_ID")
     messages = parse_messages(payload, phone_id)
-    # Resolve client only for text events; statuses require no outbound token.
+    # Resolve client only for supported message events; statuses need no token.
     if messages:
         client = client_factory()
         for incoming in messages:
             target = await run_in_threadpool(persist_inbound, db, incoming)
             if target is not None:
-                background_tasks.add_task(send_automatic_reply, target, client, session_factory, incoming.text, ai_service)
+                extra = {"image": incoming.image} if incoming.image is not None else {}
+                background_tasks.add_task(send_automatic_reply, target, client, session_factory, incoming.text, ai_service, **extra)
     return {"status": "ok"}

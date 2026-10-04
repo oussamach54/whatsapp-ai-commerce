@@ -20,7 +20,7 @@ class SalesRouter:
             logger.warning("ai.admission_unavailable")
             return "suppressed"
 
-    def reply(self, text, conversation_id, load_history):
+    def reply(self, text, conversation_id, load_history, *, image=None, media_client=None):
         style = language_style(text)
         try:
             status = self.admission.begin()
@@ -32,11 +32,30 @@ class SalesRouter:
         if len(text) > self.settings.ai_max_input_chars:
             self.admission.safe_record(category="too_long", path="local", exclude_history=True, fallback=False)
             return SalesReply(local_reply("shorten", style), True)
+        from app.ai.multimodal import route_input
+        contextual = route_input(self, text, image, media_client, style)
+        if contextual is not None:
+            return contextual
         try:
             AIHistoryMessage(role="user", content=text)
         except ValueError:
             self.admission.safe_record(category="invalid_input", path="local", exclude_history=True, fallback=False)
             return SalesReply(local_reply("clarify", style), True)
+
+        if self.catalog is not None:
+            from app.ai.order_cancellation import selection_priority
+            try:
+                choosing = selection_priority(self.catalog, text)
+            except Exception:
+                self.admission.safe_record(fallback=True, failure_category="cancellation_selection_unavailable")
+                return SalesReply(None, True)
+            if choosing:
+                # A delivered order-list answer is not a product query. The turn
+                # revalidates delivery, ownership and membership before resolving.
+                if not self.admission.safe_record(category="commerce", intent="support", path="local"):
+                    return SalesReply(None, True)
+                from app.ai.catalog_orchestrator import run_catalog
+                return run_catalog(self.service, text, [], style, self.admission, self.catalog)
 
         decision, safe_text = local_route(text)
         # Social/obvious unrelated shortcuts need no history query.
@@ -51,12 +70,19 @@ class SalesRouter:
         decision, safe_text = local_route(text, history)
         if self.catalog is not None:
             from app.services.checkout_service import answer, CANCELLATIONS
+            from app.ai.order_cancellation import cancellation_request
+            if cancellation_request(safe_text):
+                decision = decision.model_copy(update={"scope": "commerce", "intent": "support"})
             # Acknowledgements are commercial only when an application cart exists.
             if answer(safe_text) is not None or normalize(safe_text).strip(" .!") in CANCELLATIONS:
                 from app.services.checkout_service import load_cart
                 try:
                     cart, _ = load_cart(self.catalog)
-                    if cart:
+                    from app.services.order_cancellation_service import latest_cancellation
+                    with self.catalog.sessions() as db:
+                        self.catalog.authorize(db)
+                        cancellation, _ = latest_cancellation(db, self.catalog)
+                    if cart or cancellation:
                         decision = decision.model_copy(update={"scope": "commerce", "intent": "purchase"})
                 except Exception:
                     return SalesReply(None, True)

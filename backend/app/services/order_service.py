@@ -46,7 +46,13 @@ def create_order(db: Session, data: OrderCreate) -> Order:
 
 def update_order_status(db: Session, order_id: UUID, data: OrderStatusUpdate) -> Order:
     with transaction(db):
-        apply_update(get_order(db, order_id), data)
+        order = db.scalar(select(Order).where(Order.id == order_id).with_for_update()
+                          .execution_options(populate_existing=True))
+        if order is None:
+            raise ServiceError(404, "Order not found")
+        if order.status == OrderStatus.CANCELLED and data.status != OrderStatus.CANCELLED:
+            raise ServiceError(409, "A cancelled order cannot reenter fulfillment")
+        apply_update(order, data)
     return get_order(db, order_id)
 
 def update_payment_status(db: Session, order_id: UUID, data: PaymentStatusUpdate) -> Order:

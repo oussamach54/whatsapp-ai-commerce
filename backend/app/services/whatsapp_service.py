@@ -38,10 +38,11 @@ def persist_inbound(db: Session, incoming: IncomingText) -> ReplyTarget | None:
         db.execute(select(Conversation.id).where(Conversation.id == conversation.id).with_for_update())
         message = stage_message(db, conversation.id, MessageCreate(
             direction=MessageDirection.INBOUND, sender_type=SenderType.CUSTOMER,
-            message_type=MessageType.TEXT, content=incoming.text,
+            message_type=MessageType.IMAGE if incoming.image else MessageType.TEXT, content=incoming.text,
             external_message_id=incoming.external_message_id,
             metadata={"provider": "whatsapp", "phone_number_id": incoming.phone_number_id,
-                      "received_at": db.scalar(select(func.clock_timestamp())).isoformat()}))
+                      "received_at": db.scalar(select(func.clock_timestamp())).isoformat(),
+                      **({"image": incoming.image.model_dump()} if incoming.image else {})}))
         if incoming.timestamp is not None:
             message.created_at = incoming.timestamp
         db.flush()
@@ -50,7 +51,7 @@ def persist_inbound(db: Session, incoming: IncomingText) -> ReplyTarget | None:
     return target
 
 def send_automatic_reply(target: ReplyTarget, client: TextMessageClient, session_factory: SessionFactory,
-    message_text: str = "", ai_service: AIService | None = None) -> None:
+    message_text: str = "", ai_service: AIService | None = None, *, image=None) -> None:
     """Runs after HTTP acknowledgement with a separate session and no inbound rollback."""
     def load_history():
         if ai_service is not None and ai_service.history_max_messages and ai_service.history_max_chars:
@@ -64,15 +65,18 @@ def send_automatic_reply(target: ReplyTarget, client: TextMessageClient, session
     commerce_state = None
     guard_ordering = False
     preserve_commerce = False
+    confirmation_prompt = None
     if ai_service is not None:
         settings = ai_service.settings or get_settings()
         from app.services.catalog_service import CatalogService
         catalog = CatalogService(session_factory, settings, target) if ai_service.catalog_enabled else None
+        extra = {"image": image, "media_client": client} if image is not None else {}
         result = SalesRouter(ai_service, OpenAIClassifier(settings),
-            AIAdmission(session_factory, settings, target), settings, catalog).reply(message_text, target.conversation_id, load_history)
+            AIAdmission(session_factory, settings, target), settings, catalog).reply(message_text, target.conversation_id, load_history, **extra)
         reply_text, exclude_history = result.text, result.exclude_history
         catalog_refs = result.catalog_refs
         commerce_state = result.commerce_state
+        confirmation_prompt = result.confirmation_prompt
         preserve_commerce = result.preserve_commerce
         guard_ordering = catalog_refs is not None or commerce_state is not None
         if reply_text is None:
@@ -120,6 +124,7 @@ def send_automatic_reply(target: ReplyTarget, client: TextMessageClient, session
                     metadata={"provider": "whatsapp", "in_reply_to": str(target.inbound_id),
                               "ai_guard": {"exclude_history": exclude_history or stale},
                               "turn_status": "superseded" if stale else "current",
+                              **({"confirmation_prompt": confirmation_prompt} if confirmation_prompt is not None and not stale else {}),
                               **({"catalog_refs": catalog_refs} if catalog_refs is not None and not stale else {}),
                               **({"commerce_state": commerce_state} if commerce_state is not None and not stale else {})}))
     except Exception:

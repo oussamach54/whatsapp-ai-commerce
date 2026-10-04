@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     checkout_country: str = Field(default="MA", pattern=r"^[A-Z]{2}$")
     checkout_shipping_cost: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
     delivery_policy: DeliveryPolicy = Field(default_factory=DeliveryPolicy)
+    # Fulfillment must explicitly opt in to cancelling processing orders.
+    customer_cancellation_statuses: list[Literal["pending", "confirmed", "processing"]] = Field(
+        default_factory=lambda: ["pending", "confirmed"], max_length=3)
+    customer_cancellation_recent_days: int = Field(default=30, ge=1, le=365)
+    customer_cancellation_confirmation_seconds: int = Field(default=900, ge=1, le=900)
     database_host: str
     database_port: int = 5432
     database_name: str
@@ -68,6 +73,16 @@ class Settings(BaseSettings):
     ai_spam_window_seconds: int = Field(default=60, ge=1, le=3600)
     ai_notice_cooldown_seconds: int = Field(default=60, ge=1, le=3600)
     whatsapp_max_body_bytes: int = Field(default=1048576, ge=1024, le=10485760)
+    whatsapp_image_max_bytes: int = Field(default=5242880, ge=1024, le=10485760)
+    whatsapp_media_timeout_seconds: float = Field(default=10.0, gt=0, le=30, allow_inf_nan=False)
+    storefront_base_url: str | None = None
+    storefront_product_path_template: str = "/products/{slug}"
+
+    @model_validator(mode="after")
+    def storefront_configuration(self):
+        from app.services.product_links import validate_configuration
+        validate_configuration(self.storefront_base_url, self.storefront_product_path_template)
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

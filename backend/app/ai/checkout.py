@@ -18,6 +18,8 @@ def phrase(style, french, english, darija, arabic):
 
 def render_cart(turn, result="offer", problem=None):
     cart, style = turn.state.cart, turn.style
+    turn.confirmation_prompt = ({"action": "checkout", "id": str(cart.id), "version": cart.version}
+                                if result in ("offer", "price") and cart.status == "awaiting_confirmation" else None)
     if result == "missing":
         labels = {
             "customer_name": ("nom", "name", "smiya", "السمية"),

@@ -31,7 +31,7 @@ def create_conversation(db: Session, data: ConversationCreate) -> Conversation:
     return get_conversation(db, resource_id)
 
 def add_message(db: Session, conversation_id: UUID, data: MessageCreate) -> Message:
-    if data.metadata and ({"ai_guard", "catalog_refs", "commerce_state", "turn_status", "received_at", "checkout_state", "checkout_private"} & data.metadata.keys()):
+    if data.metadata and ({"ai_guard", "catalog_refs", "commerce_state", "turn_status", "received_at", "checkout_state", "checkout_private", "cancellation_state", "confirmation_prompt"} & data.metadata.keys()):
         from app.services.common import ServiceError
         raise ServiceError(422, "Conversation control metadata is application-owned")
     with transaction(db):

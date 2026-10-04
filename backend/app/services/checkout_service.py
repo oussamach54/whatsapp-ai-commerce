@@ -8,7 +8,7 @@ from sqlalchemy import select, tuple_
 from app.ai.checkout_state import Cart, CustomerValue
 from app.ai.scope import normalize
 from app.models import Conversation, Customer, Message, Order, Product, ProductVariant
-from app.models.enums import MessageDirection, SenderType
+from app.models.enums import MessageDirection, MessageType, SenderType
 from app.services.common import transaction
 from app.services.conversation_service import message_order_time
 
@@ -112,23 +112,14 @@ def confirmation_authorized(db, catalog, cart):
     if cart.confirmed_version != cart.version or not cart.confirmation_message_id:
         return False
     origin = db.get(Message, cart.confirmation_message_id)
-    if not origin or origin.conversation_id != catalog.target.conversation_id or origin.direction != MessageDirection.INBOUND or origin.sender_type != SenderType.CUSTOMER or answer(origin.content or "") is not True:
+    if not origin or origin.message_type != MessageType.TEXT or origin.conversation_id != catalog.target.conversation_id or origin.direction != MessageDirection.INBOUND or origin.sender_type != SenderType.CUSTOMER or answer(origin.content or "") is not True:
         return False
     ordered = message_order_time()
     anchor = db.scalar(select(ordered).where(Message.id == origin.id))
     if not 0 <= (anchor - cart.offered_at).total_seconds() <= 900:
         return False
-    # A successful channel send with this exact version must predate consent.
-    return bool(db.scalar(select(Message.id).where(
-        Message.conversation_id == catalog.target.conversation_id,
-        Message.direction == MessageDirection.OUTBOUND,
-        Message.metadata_["provider"].astext == "whatsapp",
-        Message.metadata_["commerce_state"]["cart"]["id"].astext == str(cart.id),
-        Message.metadata_["commerce_state"]["cart"]["version"].astext == str(cart.version),
-        Message.metadata_["commerce_state"]["cart"]["status"].astext == "awaiting_confirmation",
-        Message.metadata_["turn_status"].astext == "current",
-        Message.external_message_id.is_not(None), Message.external_message_id != "",
-        ordered < anchor).limit(1)))
+    from app.services.confirmation_context import prompt_matches
+    return prompt_matches(db, catalog, {"action": "checkout", "id": str(cart.id), "version": cart.version}, origin.id)
 
 
 def recover_completed(turn):
